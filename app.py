@@ -4,21 +4,17 @@ import sqlite3
 import uuid
 import requests
 
-from flask import (
-    Flask, request, jsonify, render_template_string, session
-)
+from flask import Flask, request, jsonify, render_template_string, session
 
 # ---------------- CONFIG ----------------
 
 app = Flask(__name__)
-
-app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32))
+app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(32)
 
 DB_NAME = "padam_ai.db"
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 
@@ -64,39 +60,31 @@ def save_message(chat_id, role, content):
 def get_history(chat_id):
     conn = get_db()
     rows = conn.execute(
-        "SELECT role, content FROM messages "
-        "WHERE chat_id = ? ORDER BY id ASC",
+        "SELECT role, content FROM messages WHERE chat_id = ? ORDER BY id ASC",
         (chat_id,)
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
 
 
-# ---------------- OPENAI AI ENGINE ----------------
+# ---------------- OPENAI ENGINE ----------------
 
 def ask_ai(history):
-
     if not OPENAI_API_KEY:
-        return (
-            "PADAM AI मा OpenAI API Key सेट गरिएको छैन। "
-            "कृपया Render Environment मा OPENAI_API_KEY जाँच गर्नुहोस्।"
-        )
+        return "त्रुटि: Render मा OPENAI_API_KEY सेट गरिएको छैन।"
 
-    system_message = {
+    messages = [{
         "role": "system",
         "content": (
-            "Your name is PADAM AI. "
-            "You are a helpful, intelligent and friendly AI assistant. "
-            "You can communicate fluently in Nepali and English. "
+            "Your name is PADAM AI. You are a helpful and intelligent AI assistant. "
+            "Communicate fluently in Nepali and English. "
             "Reply in the language used by the user. "
             "Give clear, accurate and useful answers. "
-            "Understand conversation context and previous messages. "
-            "If you are uncertain, say so honestly. "
-            "Never pretend to know something you do not know."
+            "Understand conversation context. "
+            "If uncertain, say so honestly."
         )
-    }
+    }]
 
-    messages = [system_message]
     messages.extend(history[-20:])
 
     try:
@@ -114,34 +102,49 @@ def ask_ai(history):
             timeout=90
         )
 
-        if response.status_code == 401:
-            return "OpenAI API Key गलत वा निष्क्रिय छ। Render Environment मा जाँच गर्नुहोस्।"
+        if response.status_code != 200:
+            try:
+                error_data = response.json()
+                error_message = error_data.get("error", {}).get(
+                    "message", "Unknown API error"
+                )
+            except ValueError:
+                error_message = "Could not read API error"
 
-        if response.status_code == 429:
-            return (
-                "OpenAI API को Usage Limit पुगेको छ "
-                "वा Billing उपलब्ध छैन। आफ्नो API Usage जाँच गर्नुहोस्।"
-            )
+            print("OpenAI API Error:", response.status_code, error_message)
 
-        response.raise_for_status()
+            if response.status_code == 401:
+                return "त्रुटि 401: API Key गलत, निष्क्रिय वा revoke भएको छ।"
+
+            if response.status_code == 429:
+                return "त्रुटि 429: API Usage Limit वा Billing समस्या छ।"
+
+            if response.status_code == 403:
+                return "त्रुटि 403: API Permission उपलब्ध छैन।"
+
+            if response.status_code == 404:
+                return "त्रुटि 404: Model उपलब्ध छैन। OPENAI_MODEL जाँच गर्नुहोस्।"
+
+            return f"OpenAI Error {response.status_code}: {error_message}"
 
         data = response.json()
-
         reply = data["choices"][0]["message"]["content"]
 
-        if not reply:
-            return "माफ गर्नुहोस्, अहिले जवाफ प्राप्त भएन। फेरि प्रयास गर्नुहोस्।"
+        if not reply or not reply.strip():
+            return "AI बाट खाली जवाफ आयो। फेरि प्रयास गर्नुहोस्।"
 
         return reply.strip()
 
     except requests.exceptions.Timeout:
-        return "AI ले जवाफ दिन ढिलो गर्‍यो। कृपया फेरि प्रयास गर्नुहोस्।"
+        return "OpenAI जवाफ दिन ढिलो भयो। फेरि प्रयास गर्नुहोस्।"
 
-    except requests.exceptions.RequestException:
-        return "OpenAI सेवा अहिले उपलब्ध छैन। केही समयपछि फेरि प्रयास गर्नुहोस्।"
+    except requests.exceptions.RequestException as error:
+        print("OpenAI Connection Error:", str(error))
+        return "OpenAI सर्भरसँग जडान हुन सकेन।"
 
-    except (KeyError, IndexError, ValueError):
-        return "AI बाट सही जवाफ प्राप्त भएन। फेरि प्रयास गर्नुहोस्।"
+    except (KeyError, IndexError, ValueError) as error:
+        print("OpenAI Response Error:", str(error))
+        return "AI बाट सही जवाफ प्राप्त भएन।"
 
 
 # ---------------- WEBSITE DESIGN ----------------
@@ -155,9 +158,7 @@ HTML = r"""
 <title>PADAM AI</title>
 
 <style>
-* {
-    box-sizing: border-box;
-}
+* { box-sizing: border-box; }
 
 body {
     margin: 0;
@@ -168,10 +169,7 @@ body {
     overflow: hidden;
 }
 
-.app {
-    display: flex;
-    height: 100vh;
-}
+.app { display: flex; height: 100vh; }
 
 .sidebar {
     width: 255px;
@@ -199,9 +197,7 @@ body {
     font-size: 15px;
 }
 
-.new-chat:hover {
-    background: #394b73;
-}
+.new-chat:hover { background: #394b73; }
 
 .sidebar-info {
     margin-top: auto;
@@ -265,9 +261,7 @@ body {
     overflow-wrap: anywhere;
 }
 
-.user {
-    background: #26385b;
-}
+.user { background: #26385b; }
 
 .bot {
     background: #151f34;
@@ -306,9 +300,7 @@ textarea {
     max-height: 130px;
 }
 
-textarea::placeholder {
-    color: #8995ac;
-}
+textarea::placeholder { color: #8995ac; }
 
 .send {
     background: #657af5;
@@ -320,10 +312,7 @@ textarea::placeholder {
     font-weight: bold;
 }
 
-.send:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
+.send:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .footer {
     text-align: center;
@@ -333,21 +322,10 @@ textarea::placeholder {
 }
 
 @media(max-width:650px) {
-    .sidebar {
-        display: none;
-    }
-
-    .welcome h1 {
-        font-size: 30px;
-    }
-
-    .messages {
-        padding: 12px 8px;
-    }
-
-    .message {
-        padding: 13px;
-    }
+    .sidebar { display: none; }
+    .welcome h1 { font-size: 30px; }
+    .messages { padding: 12px 8px; }
+    .message { padding: 13px; }
 }
 </style>
 </head>
@@ -357,11 +335,7 @@ textarea::placeholder {
 
     <aside class="sidebar">
         <div class="logo">✦ PADAM AI</div>
-
-        <button class="new-chat" onclick="newChat()">
-            + New Chat
-        </button>
-
+        <button class="new-chat" onclick="newChat()">+ New Chat</button>
         <div class="sidebar-info">
             Your AI. Your Code. Your Control.<br><br>
             Powered by OpenAI.
@@ -369,41 +343,29 @@ textarea::placeholder {
     </aside>
 
     <main class="main">
-
         <header class="topbar">
             ✦ PADAM AI
             <span class="status">● Assistant</span>
         </header>
 
         <section class="messages" id="messages">
-
             <div class="welcome" id="welcome">
                 <h1>Hello, I'm PADAM AI.</h1>
-                <p>
-                    Welcome! I'm your personal AI assistant.
-                    Ask me anything in Nepali or English.
-                </p>
+                <p>Welcome! I'm your personal AI assistant.
+                Ask me anything in Nepali or English.</p>
             </div>
-
         </section>
 
         <form class="composer" id="chatForm">
-            <textarea
-                id="prompt"
+            <textarea id="prompt"
                 placeholder="Message PADAM AI..."
-                rows="1"
-                required
-            ></textarea>
-
-            <button class="send" id="send" type="submit">
-                Send ↑
-            </button>
+                rows="1" required></textarea>
+            <button class="send" id="send" type="submit">Send ↑</button>
         </form>
 
         <div class="footer">
             PADAM AI can make mistakes. Verify important information.
         </div>
-
     </main>
 </div>
 
@@ -414,8 +376,7 @@ const sendButton = document.getElementById("send");
 const form = document.getElementById("chatForm");
 
 function addMessage(role, content) {
-    const welcome = document.getElementById("welcome");
-    if (welcome) welcome.remove();
+    document.getElementById("welcome")?.remove();
 
     const box = document.createElement("div");
     box.className = "message " + role;
@@ -430,7 +391,6 @@ function addMessage(role, content) {
     box.appendChild(label);
     box.appendChild(text);
     messages.appendChild(box);
-
     messages.scrollTop = messages.scrollHeight;
 }
 
@@ -441,7 +401,6 @@ async function loadHistory() {
 
         if (data.messages && data.messages.length) {
             document.getElementById("welcome")?.remove();
-
             data.messages.forEach(item => {
                 addMessage(
                     item.role === "user" ? "user" : "bot",
@@ -450,7 +409,7 @@ async function loadHistory() {
             });
         }
     } catch (error) {
-        console.error(error);
+        console.error("History error:", error);
     }
 }
 
@@ -458,7 +417,7 @@ form.addEventListener("submit", async function(event) {
     event.preventDefault();
 
     const message = promptBox.value.trim();
-    if (!message) return;
+    if (!message || sendButton.disabled) return;
 
     addMessage("user", message);
     promptBox.value = "";
@@ -470,48 +429,37 @@ form.addEventListener("submit", async function(event) {
     typing.className = "message bot";
     typing.textContent = "PADAM AI is thinking...";
     typing.id = "typing";
-
     messages.appendChild(typing);
-    messages.scrollTop = messages.scrollHeight;
 
     try {
         const response = await fetch("/chat", {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({message: message})
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({message})
         });
 
         const data = await response.json();
-
         document.getElementById("typing")?.remove();
 
         if (!response.ok) {
             addMessage("bot", data.error || "Something went wrong.");
         } else {
-            addMessage("bot", data.reply);
+            addMessage("bot", data.reply || "Empty response from server.");
         }
-
     } catch (error) {
         document.getElementById("typing")?.remove();
         addMessage("bot", "Connection error. Please try again.");
+    } finally {
+        sendButton.disabled = false;
+        sendButton.textContent = "Send ↑";
+        promptBox.focus();
     }
-
-    sendButton.disabled = false;
-    sendButton.textContent = "Send ↑";
-    promptBox.focus();
 });
 
 async function newChat() {
     try {
-        const response = await fetch("/new-chat", {
-            method: "POST"
-        });
-
-        if (!response.ok) {
-            throw new Error("Could not create new chat");
-        }
+        const response = await fetch("/new-chat", {method: "POST"});
+        if (!response.ok) throw new Error("New chat failed");
 
         messages.innerHTML = `
             <div class="welcome" id="welcome">
@@ -519,7 +467,6 @@ async function newChat() {
                 <p>Welcome! Ask me anything in Nepali or English.</p>
             </div>
         `;
-
     } catch (error) {
         alert("Could not create a new chat. Please try again.");
     }
@@ -534,7 +481,6 @@ promptBox.addEventListener("keydown", function(event) {
 
 loadHistory();
 </script>
-
 </body>
 </html>
 """
@@ -556,7 +502,6 @@ def history():
 
 @app.route("/chat", methods=["POST"])
 def chat():
-
     data = request.get_json(silent=True) or {}
     message = (data.get("message") or "").strip()
 
@@ -567,11 +512,9 @@ def chat():
         return jsonify(error="Message is too long."), 400
 
     chat_id = get_chat_id()
-
     save_message(chat_id, "user", message)
 
     chat_history = get_history(chat_id)
-
     reply = ask_ai(chat_history)
 
     save_message(chat_id, "assistant", reply)
