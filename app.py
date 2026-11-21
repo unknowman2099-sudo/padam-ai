@@ -12,18 +12,14 @@ from flask import (
 
 app = Flask(__name__)
 
-app.secret_key = os.environ.get(
-    "SECRET_KEY", "change-this-secret-before-deployment"
-)
+app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32))
 
 DB_NAME = "padam_ai.db"
 
-HF_TOKEN = os.environ.get("HF_TOKEN", "")
-HF_MODEL = os.environ.get(
-    "HF_MODEL", "Qwen/Qwen2.5-7B-Instruct"
-)
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
-HF_URL = "https://router.huggingface.co/v1/chat/completions"
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 
 # ---------------- DATABASE ----------------
@@ -76,56 +72,73 @@ def get_history(chat_id):
     return [dict(row) for row in rows]
 
 
-# ---------------- AI ENGINE ----------------
+# ---------------- OPENAI AI ENGINE ----------------
 
 def ask_ai(history):
-    if not HF_TOKEN:
+
+    if not OPENAI_API_KEY:
         return (
-            "PADAM AI तयार छ! तर वास्तविक AI जवाफका लागि "
-            "Render मा HF_TOKEN सेट गर्नुपर्छ।"
+            "PADAM AI मा OpenAI API Key सेट गरिएको छैन। "
+            "कृपया Render Environment मा OPENAI_API_KEY जाँच गर्नुहोस्।"
         )
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Your name is PADAM AI. "
-                "You are a helpful, friendly AI assistant. "
-                "You can communicate in Nepali and English. "
-                "Give clear, accurate and useful answers. "
-                "If you are uncertain, say so honestly."
-            )
-        }
-    ]
+    system_message = {
+        "role": "system",
+        "content": (
+            "Your name is PADAM AI. "
+            "You are a helpful, intelligent and friendly AI assistant. "
+            "You can communicate fluently in Nepali and English. "
+            "Reply in the language used by the user. "
+            "Give clear, accurate and useful answers. "
+            "Understand conversation context and previous messages. "
+            "If you are uncertain, say so honestly. "
+            "Never pretend to know something you do not know."
+        )
+    }
 
+    messages = [system_message]
     messages.extend(history[-20:])
 
     try:
         response = requests.post(
-            HF_URL,
+            OPENAI_URL,
             headers={
-                "Authorization": f"Bearer {HF_TOKEN}",
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
                 "Content-Type": "application/json"
             },
             json={
-                "model": HF_MODEL,
+                "model": OPENAI_MODEL,
                 "messages": messages,
-                "max_tokens": 700,
-                "temperature": 0.7
+                "max_completion_tokens": 800
             },
             timeout=90
         )
 
+        if response.status_code == 401:
+            return "OpenAI API Key गलत वा निष्क्रिय छ। Render Environment मा जाँच गर्नुहोस्।"
+
+        if response.status_code == 429:
+            return (
+                "OpenAI API को Usage Limit पुगेको छ "
+                "वा Billing उपलब्ध छैन। आफ्नो API Usage जाँच गर्नुहोस्।"
+            )
+
         response.raise_for_status()
+
         data = response.json()
 
-        return data["choices"][0]["message"]["content"]
+        reply = data["choices"][0]["message"]["content"]
+
+        if not reply:
+            return "माफ गर्नुहोस्, अहिले जवाफ प्राप्त भएन। फेरि प्रयास गर्नुहोस्।"
+
+        return reply.strip()
 
     except requests.exceptions.Timeout:
-        return "माफ गर्नुहोस्, AI ले जवाफ दिन ढिलो गर्‍यो। फेरि प्रयास गर्नुहोस्।"
+        return "AI ले जवाफ दिन ढिलो गर्‍यो। कृपया फेरि प्रयास गर्नुहोस्।"
 
     except requests.exceptions.RequestException:
-        return "AI सेवा अहिले उपलब्ध छैन। Token र Model जाँच गर्नुहोस्।"
+        return "OpenAI सेवा अहिले उपलब्ध छैन। केही समयपछि फेरि प्रयास गर्नुहोस्।"
 
     except (KeyError, IndexError, ValueError):
         return "AI बाट सही जवाफ प्राप्त भएन। फेरि प्रयास गर्नुहोस्।"
@@ -344,13 +357,14 @@ textarea::placeholder {
 
     <aside class="sidebar">
         <div class="logo">✦ PADAM AI</div>
+
         <button class="new-chat" onclick="newChat()">
             + New Chat
         </button>
 
         <div class="sidebar-info">
             Your AI. Your Code. Your Control.<br><br>
-            Powered by an open-source model.
+            Powered by OpenAI.
         </div>
     </aside>
 
@@ -448,6 +462,7 @@ form.addEventListener("submit", async function(event) {
 
     addMessage("user", message);
     promptBox.value = "";
+
     sendButton.disabled = true;
     sendButton.textContent = "...";
 
@@ -455,8 +470,8 @@ form.addEventListener("submit", async function(event) {
     typing.className = "message bot";
     typing.textContent = "PADAM AI is thinking...";
     typing.id = "typing";
-    messages.appendChild(typing);
 
+    messages.appendChild(typing);
     messages.scrollTop = messages.scrollHeight;
 
     try {
@@ -469,6 +484,7 @@ form.addEventListener("submit", async function(event) {
         });
 
         const data = await response.json();
+
         document.getElementById("typing")?.remove();
 
         if (!response.ok) {
@@ -488,13 +504,25 @@ form.addEventListener("submit", async function(event) {
 });
 
 async function newChat() {
-    await fetch("/new-chat", {method: "POST"});
-    messages.innerHTML = `
-        <div class="welcome" id="welcome">
-            <h1>Hello, I'm PADAM AI.</h1>
-            <p>Welcome! Ask me anything in Nepali or English.</p>
-        </div>
-    `;
+    try {
+        const response = await fetch("/new-chat", {
+            method: "POST"
+        });
+
+        if (!response.ok) {
+            throw new Error("Could not create new chat");
+        }
+
+        messages.innerHTML = `
+            <div class="welcome" id="welcome">
+                <h1>Hello, I'm PADAM AI.</h1>
+                <p>Welcome! Ask me anything in Nepali or English.</p>
+            </div>
+        `;
+
+    } catch (error) {
+        alert("Could not create a new chat. Please try again.");
+    }
 }
 
 promptBox.addEventListener("keydown", function(event) {
@@ -528,6 +556,7 @@ def history():
 
 @app.route("/chat", methods=["POST"])
 def chat():
+
     data = request.get_json(silent=True) or {}
     message = (data.get("message") or "").strip()
 
@@ -541,8 +570,9 @@ def chat():
 
     save_message(chat_id, "user", message)
 
-    history = get_history(chat_id)
-    reply = ask_ai(history)
+    chat_history = get_history(chat_id)
+
+    reply = ask_ai(chat_history)
 
     save_message(chat_id, "assistant", reply)
 
